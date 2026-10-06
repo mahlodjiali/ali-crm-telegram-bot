@@ -13,9 +13,13 @@ const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 // Claude Client
 const anthropic = new Anthropic({ apiKey: CLAUDE_API_KEY });
 
-// Airtable Konfiguration
-Airtable.configure({ apiKey: AIRTABLE_TOKEN });
-const base = Airtable.base(AIRTABLE_BASE_ID);
+// Airtable REST API Setup (via axios - zuverlässiger mit PATs)
+const AIRTABLE_API_URL = 'https://api.airtable.com/v0';
+const airtableHeaders = {
+  'Authorization': `Bearer ${AIRTABLE_TOKEN}`,
+  'Content-Type': 'application/json'
+};
+
 const PERSONEN_TABLE = 'Personen';
 const EMAIL_DRAFTS_TABLE = 'Email Entwürfe'; // Neue Tabelle für Entwürfe
 
@@ -137,69 +141,76 @@ async function parseContactFromText(text) {
   return jsonMatch ? JSON.parse(jsonMatch[0]) : { name: 'Unbekannt' };
 }
 
-// Speichere Kontakt in Airtable
+// Speichere Kontakt in Airtable via REST API
 async function saveContactToAirtable(data, photoUrl = null) {
   try {
-    const record = {
+    const fields = {
       Name: data.name || 'Unbekannt',
-      Rolle: data.rolle || undefined,
-      Firma: data.firma || undefined,
-      'E-Mail': data.email || undefined,
-      Telefon: data.telefon || undefined,
-      LinkedIn: data.linkedin || undefined,
-      Website: data.website || undefined,
-      Notizen: data.notizen || undefined,
-      Stadt: data.stadt || undefined,
-      Kategorie: data.kategorie || undefined,
-      Tonalität: data.tonalitaet || undefined,
     };
     
-    // Entferne undefined Werte
-    Object.keys(record).forEach(key => record[key] === undefined && delete record[key]);
+    if (data.rolle) fields.Rolle = data.rolle;
+    if (data.firma) fields.Firma = data.firma;
+    if (data.email) fields['E-Mail'] = data.email;
+    if (data.telefon) fields.Telefon = data.telefon;
+    if (data.linkedin) fields.LinkedIn = data.linkedin;
+    if (data.website) fields.Website = data.website;
+    if (data.notizen) fields.Notizen = data.notizen;
+    if (data.stadt) fields.Stadt = data.stadt;
+    if (data.kategorie) fields.Kategorie = data.kategorie;
+    if (data.tonalitaet) fields.Tonalität = data.tonalitaet;
     
-    // Füge Foto hinzu wenn vorhanden
     if (photoUrl) {
-      record.Foto = [{ url: photoUrl }];
+      fields.Foto = [{ url: photoUrl }];
     }
     
-    const newRecord = await base(PERSONEN_TABLE).create([{ fields: record }]);
-    return newRecord[0].id;
+    const response = await axios.post(
+      `${AIRTABLE_API_URL}/${AIRTABLE_BASE_ID}/${PERSONEN_TABLE}`,
+      { records: [{ fields }] },
+      { headers: airtableHeaders }
+    );
+    
+    return response.data.records[0].id;
   } catch (err) {
-    console.error('Fehler beim Speichern in Airtable:', err);
+    console.error('Fehler beim Speichern in Airtable:', err.response?.data || err.message);
     throw err;
   }
 }
 
-// Finde Kontakt in Airtable
+// Finde Kontakt in Airtable via REST API
 async function findContactByName(name) {
   try {
-    const records = await base(PERSONEN_TABLE)
-      .select({
-        filterByFormula: `SEARCH(LOWER("${name.toLowerCase()}"), LOWER({Name}))`,
-      })
-      .firstPage();
+    const filterFormula = `SEARCH(LOWER("${name.toLowerCase()}"), LOWER({Name}))`;
+    const response = await axios.get(
+      `${AIRTABLE_API_URL}/${AIRTABLE_BASE_ID}/${PERSONEN_TABLE}?filterByFormula=${encodeURIComponent(filterFormula)}`,
+      { headers: airtableHeaders }
+    );
     
-    return records.length > 0 ? records[0] : null;
+    return response.data.records.length > 0 ? response.data.records[0] : null;
   } catch (err) {
-    console.error('Kontaktsuche fehlgeschlagen:', err);
+    console.error('Kontaktsuche fehlgeschlagen:', err.response?.data || err.message);
     return null;
   }
 }
 
-// Speichere Email-Entwurf in Airtable
+// Speichere Email-Entwurf in Airtable via REST API
 async function saveEmailDraft(contactName, contactEmail, subject, body) {
   try {
-    // Erstelle die Tabelle falls nicht vorhanden
-    await base(EMAIL_DRAFTS_TABLE).create([{
-      fields: {
-        'Empfänger': contactName,
-        'Email': contactEmail,
-        'Betreff': subject,
-        'Entwurf': body,
-        'Status': 'Entwurf',
-        'Erstellt': new Date().toISOString(),
-      }
-    }]);
+    await axios.post(
+      `${AIRTABLE_API_URL}/${AIRTABLE_BASE_ID}/${encodeURIComponent(EMAIL_DRAFTS_TABLE)}`,
+      {
+        records: [{
+          fields: {
+            'Empfänger': contactName,
+            'Email': contactEmail,
+            'Betreff': subject,
+            'Entwurf': body,
+            'Status': 'Entwurf',
+            'Erstellt': new Date().toISOString(),
+          }
+        }]
+      },
+      { headers: airtableHeaders }
+    );
     return true;
   } catch (err) {
     console.error('Fehler beim Speichern des Email-Entwurfs:', err);
