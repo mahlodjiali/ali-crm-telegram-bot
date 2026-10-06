@@ -1,5 +1,4 @@
 const { Telegraf, session } = require('telegraf');
-const Airtable = require('airtable');
 const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk');
 require('dotenv').config();
@@ -21,7 +20,7 @@ const airtableHeaders = {
 };
 
 const PERSONEN_TABLE = 'Personen';
-const EMAIL_DRAFTS_TABLE = 'Email Entwürfe'; // Neue Tabelle für Entwürfe
+const EMAIL_DRAFTS_TABLE = 'Email Entwürfe';
 
 // Telegram Bot
 const bot = new Telegraf(TELEGRAM_TOKEN);
@@ -32,6 +31,7 @@ bot.use(session({
     state: null,
     contactData: null,
     photoUrl: null,
+    photoData: null,
     followupContact: null,
     emailDraft: null,
   })
@@ -62,7 +62,7 @@ async function extractBusinessCardData(imageUrl) {
             },
             {
               type: 'text',
-              text: 'Extrahiere Kontaktinformationen aus dieser Visitenkarte und antworte NUR mit JSON (keine anderen Zeichen). Format: {name, rolle, firma, email, telefon, linkedin, website}. Nur vorhandene Felder einschließen.',
+              text: 'Extrahiere folgende Informationen aus dieser Visitenkarte (JSON format): name, rolle, firma, email, telefon, linkedin, website, adresse, stadt. Antworte NUR mit JSON, keine anderen Zeichen.',
             },
           ],
         },
@@ -70,75 +70,52 @@ async function extractBusinessCardData(imageUrl) {
     });
     
     const content = message.content[0].text;
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    return jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+    return JSON.parse(content);
   } catch (err) {
     console.error('OCR fehlgeschlagen:', err);
     return {};
   }
 }
 
-// Lade Foto zu Airtable und gib URL zurück
-async function uploadPhotoToAirtable(fileUrl, fileName) {
-  try {
-    const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
-    const base64 = Buffer.from(response.data).toString('base64');
-    
-    // Speichere als Datei-Referenz (wird in Airtable eingebunden)
-    return {
-      url: fileUrl,
-      filename: fileName || 'photo.jpg',
-    };
-  } catch (err) {
-    console.error('Foto-Upload fehlgeschlagen:', err);
-    return null;
-  }
-}
-
-// Erweitere Airtable-Struktur dynamisch
-async function ensureFieldExists(fieldName, fieldType = 'singleLineText') {
-  try {
-    const schema = await base(PERSONEN_TABLE).describe();
-    const fieldExists = schema.fields.find(f => f.name.toLowerCase() === fieldName.toLowerCase());
-    
-    if (!fieldExists) {
-      console.log(`Erstelle neues Feld: ${fieldName}`);
-      // Hinweis: Airtable API erlaubt keine direkten Schema-Änderungen über REST
-      // Daher: Erstelle ein generisches "Weitere Infos" Feld, wenn nicht vorhanden
-      const customField = schema.fields.find(f => f.name === 'Notizen' || f.name === 'custom_fields');
-      if (!customField) {
-        console.log(`Warnung: ${fieldName} kann nicht hinzugefügt werden - nutze Notizen-Feld stattdessen`);
-      }
-      return 'Notizen'; // Fallback
-    }
-    return fieldName;
-  } catch (err) {
-    console.error('Schema-Abfrage fehlgeschlagen:', err);
-    return 'Notizen';
-  }
-}
-
 // Extrahiere Daten aus Text
 async function parseContactFromText(text) {
-  const message = await anthropic.messages.create({
-    model: 'claude-haiku-4-5',
-    max_tokens: 1024,
-    messages: [
-      {
-        role: 'user',
-        content: `Extrahiere Kontaktinformationen aus diesem Text und antworte NUR mit JSON (keine anderen Zeichen):
-        "${text}"
-        
-        Felder: name (required), rolle, firma, email, telefon, linkedin, website, notizen, stadt, kategorie, tonalitaet.
-        Format: {name, rolle, firma, ...}
-        Nur vorhandene Felder einschließen.`,
-      },
-    ],
+  try {
+    const message = await anthropic.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 1024,
+      messages: [
+        {
+          role: 'user',
+          content: `Extrahiere Kontaktinformationen aus diesem Text und antworte NUR mit JSON (keine anderen Zeichen):
+          
+"${text}"
+
+Felder: name, rolle, firma, email, telefon, linkedin, website, notizen, stadt, kategorie, tonalitaet.
+Gib nur vorhandene Felder zurück. Wenn kein Name vorhanden ist, nutze "Unbekannt".`,
+        },
+      ],
+    });
+    
+    const content = message.content[0].text;
+    return JSON.parse(content);
+  } catch (err) {
+    console.error('Text-Parsing fehlgeschlagen:', err);
+    return { name: 'Unbekannt' };
+  }
+}
+
+// Merge zwei Kontaktdaten (Foto + Text)
+function mergeContactData(photoData, textData) {
+  const merged = { ...photoData };
+  
+  // Überschreibe nur wenn Text-Daten vorhanden und spezifischer sind
+  Object.keys(textData).forEach(key => {
+    if (textData[key] && (!merged[key] || merged[key] === 'Unbekannt')) {
+      merged[key] = textData[key];
+    }
   });
   
-  const content = message.content[0].text;
-  const jsonMatch = content.match(/\{[\s\S]*\}/);
-  return jsonMatch ? JSON.parse(jsonMatch[0]) : { name: 'Unbekannt' };
+  return merged;
 }
 
 // Speichere Kontakt in Airtable via REST API
@@ -158,6 +135,7 @@ async function saveContactToAirtable(data, photoUrl = null) {
     if (data.stadt) fields.Stadt = data.stadt;
     if (data.kategorie) fields.Kategorie = data.kategorie;
     if (data.tonalitaet) fields.Tonalität = data.tonalitaet;
+    if (data.adresse) fields.Adresse = data.adresse;
     
     if (photoUrl) {
       fields.Foto = [{ url: photoUrl }];
@@ -213,7 +191,7 @@ async function saveEmailDraft(contactName, contactEmail, subject, body) {
     );
     return true;
   } catch (err) {
-    console.error('Fehler beim Speichern des Email-Entwurfs:', err);
+    console.error('Email-Entwurf speichern fehlgeschlagen:', err.response?.data || err.message);
     return false;
   }
 }
@@ -222,71 +200,104 @@ async function saveEmailDraft(contactName, contactEmail, subject, body) {
 
 // Start
 bot.command('start', (ctx) => {
-  // Initialisiere Session wenn nötig
-  if (!ctx.session) {
-    ctx.session = {
-      state: null,
-      contactData: null,
-      photoUrl: null,
-      followupContact: null,
-      emailDraft: null,
-    };
-  }
-  
+  if (!ctx.session) ctx.session = {};
   ctx.reply(
     `👋 Willkommen zu Ali's CRM Bot!\n\n` +
     `Sende mir:\n` +
-    `📝 Text → Kontaktinfo eintragen (z.B. "Max Müller, CEO von TechX, max@techx.de")\n` +
-    `📷 Visitenkarten-Foto → Claude OCR extrahiert Daten\n` +
-    `👤 Personen-Foto → Wird zum Kontakt gespeichert\n\n` +
-    `/followup [Name] → Follow-up Email senden`
+    `📸 Visitenkarten-Foto → OCR extrahiert Daten\n` +
+    `📝 Text-Beschreibung → Claude analysiert\n` +
+    `📸 + 📝 Beides zusammen → wird kombiniert & gespeichert\n\n` +
+    `/followup [Name] → Follow-up Email generieren\n` +
+    `/speichern → Speichert aktuelle Daten\n` +
+    `/br → Abbrechen`
   );
   ctx.session.state = null;
 });
 
-// Foto
+// Foto-Handler (Visitenkarte oder Profilbild)
 bot.on('photo', async (ctx) => {
-  // Stelle sicher dass session existiert
-  if (!ctx.session) {
-    ctx.session = {
-      state: null,
-      contactData: null,
-      photoUrl: null,
-      followupContact: null,
-      emailDraft: null,
-    };
-  }
-  
   try {
+    if (!ctx.session) ctx.session = {};
+    
     const fileUrl = await ctx.telegram.getFileLink(ctx.message.photo[ctx.message.photo.length - 1].file_id);
     
-    // Versuche OCR für Visitenkarte
-    ctx.reply('⏳ Verarbeite Foto...');
+    ctx.reply('⏳ Verarbeite Visitenkarte...');
     const cardData = await extractBusinessCardData(fileUrl);
     
-    if (cardData && Object.keys(cardData).length > 0) {
-      ctx.session.contactData = cardData;
-      ctx.session.photoUrl = fileUrl;
-      ctx.session.state = 'ready_save';
-      
-      ctx.reply(
-        `📇 Visitenkarte erkannt:\n` +
-        `Name: ${cardData.name || '—'}\n` +
-        `Rolle: ${cardData.rolle || '—'}\n` +
-        `Email: ${cardData.email || '—'}\n` +
-        `Firma: ${cardData.firma || '—'}\n\n` +
-        `/speichern um zu speichern`
-      );
-    } else if (ctx.session.contactData) {
-      // Speichere Foto zum bestehenden Kontakt
-      ctx.session.photoUrl = fileUrl;
-      ctx.reply('✅ Foto hinzugefügt. /speichern zum Speichern');
-    } else {
-      ctx.reply('❌ Keine Visitenkarte erkannt. Spreche die Daten auf oder versuche ein anderes Foto.');
-    }
+    // Speichere sowohl Daten als auch URL
+    ctx.session.photoUrl = fileUrl;
+    ctx.session.photoData = cardData;
+    ctx.session.state = 'waiting_for_text';
+    
+    ctx.reply(
+      `📋 Visitenkarte erkannt:\n` +
+      `Name: ${cardData.name || '—'}\n` +
+      `Rolle: ${cardData.rolle || '—'}\n` +
+      `Email: ${cardData.email || '—'}\n` +
+      `Firma: ${cardData.firma || '—'}\n\n` +
+      `Jetzt kannst du:\n` +
+      `✏️ Text-Details senden für mehr Infos\n` +
+      `oder /speichern um sofort zu speichern`
+    );
   } catch (err) {
     console.error('Fehler bei Fotoverarbeitung:', err);
     ctx.reply('❌ Fehler bei der Fotoverarbeitung');
+  }
+});
+
+// Text-Handler (kann zusätzliche Infos geben oder nach Foto kommen)
+bot.on('text', async (ctx) => {
+  try {
+    if (!ctx.session) ctx.session = {};
+    
+    // Wenn wir auf Text nach Foto warten
+    if (ctx.session.state === 'waiting_for_text' && ctx.session.photoData) {
+      ctx.reply('⏳ Analysiere Text + Foto...');
+      
+      // Parse Text
+      const textData = await parseContactFromText(ctx.message.text);
+      
+      // Merge: Foto + Text
+      const mergedData = mergeContactData(ctx.session.photoData, textData);
+      ctx.session.contactData = mergedData;
+      ctx.session.state = 'ready_save';
+      
+      ctx.reply(
+        `✅ Daten zusammengefasst:\n` +
+        `Name: ${mergedData.name}\n` +
+        `Rolle: ${mergedData.rolle || '—'}\n` +
+        `Email: ${mergedData.email || '—'}\n` +
+        `Firma: ${mergedData.firma || '—'}\n\n` +
+        `/speichern zum Speichern oder /br um abzubrechen`
+      );
+      return;
+    }
+    
+    // Wenn kein Foto da ist, analysiere nur Text
+    if (!ctx.session.photoData) {
+      ctx.reply('⏳ Analysiere Text...');
+      
+      const contactData = await parseContactFromText(ctx.message.text);
+      ctx.session.contactData = contactData;
+      ctx.session.state = 'ready_save';
+      ctx.session.photoData = contactData;
+      
+      ctx.reply(
+        `📝 Kontakt erkannt:\n` +
+        `Name: ${contactData.name}\n` +
+        `Rolle: ${contactData.rolle || '—'}\n` +
+        `Email: ${contactData.email || '—'}\n` +
+        `Firma: ${contactData.firma || '—'}\n\n` +
+        `📸 Foto senden (optional) oder /speichern`
+      );
+      return;
+    }
+    
+    // Fallback
+    ctx.reply('Sende eine Visitenkarte, Text oder nutze /start');
+  } catch (err) {
+    console.error('Fehler bei Text-Verarbeitung:', err);
+    ctx.reply('❌ Fehler bei der Verarbeitung');
   }
 });
 
@@ -294,7 +305,7 @@ bot.on('photo', async (ctx) => {
 bot.command('speichern', async (ctx) => {
   try {
     if (!ctx.session || !ctx.session.contactData) {
-      return ctx.reply('❌ Keine Kontaktdaten vorhanden. Sende zuerst eine Textnachricht oder Visitenkarte.');
+      return ctx.reply('❌ Keine Kontaktdaten vorhanden. Sende zuerst eine Visitenkarte oder Text.');
     }
     
     ctx.reply('⏳ Speichere Kontakt...');
@@ -305,6 +316,7 @@ bot.command('speichern', async (ctx) => {
     
     ctx.session.contactData = null;
     ctx.session.photoUrl = null;
+    ctx.session.photoData = null;
     ctx.session.state = null;
   } catch (err) {
     console.error('Fehler beim Speichern:', err);
@@ -312,19 +324,8 @@ bot.command('speichern', async (ctx) => {
   }
 });
 
-// Follow-up Email Entwurf
+// Follow-up Email
 bot.command('followup', async (ctx) => {
-  // Stelle sicher dass session existiert
-  if (!ctx.session) {
-    ctx.session = {
-      state: null,
-      contactData: null,
-      photoUrl: null,
-      followupContact: null,
-      emailDraft: null,
-    };
-  }
-  
   const args = ctx.message.text.split(' ').slice(1).join(' ');
   
   if (!args) {
@@ -332,6 +333,8 @@ bot.command('followup', async (ctx) => {
   }
   
   try {
+    if (!ctx.session) ctx.session = {};
+    
     ctx.reply('⏳ Suche Kontakt...');
     
     const contact = await findContactByName(args);
@@ -340,21 +343,13 @@ bot.command('followup', async (ctx) => {
       return ctx.reply(`❌ Kontakt "${args}" nicht gefunden`);
     }
     
-    if (!contact.fields['E-Mail']) {
-      return ctx.reply(`❌ Keine Email-Adresse für ${contact.fields.Name} gespeichert`);
-    }
-    
     ctx.session.followupContact = contact;
     ctx.session.state = 'draft_email';
-    ctx.session.emailDraft = {
-      name: contact.fields.Name,
-      email: contact.fields['E-Mail'],
-    };
     
     ctx.reply(
       `📧 Follow-up für: ${contact.fields.Name}\n` +
-      `Email: ${contact.fields['E-Mail']}\n\n` +
-      `Schreibe deine Nachricht (wird als Entwurf gespeichert):`
+      `Email: ${contact.fields['E-Mail'] || '—'}\n\n` +
+      `Sende eine Nachricht für die Email-Generierung.`
     );
   } catch (err) {
     console.error('Fehler bei Follow-up:', err);
@@ -362,99 +357,15 @@ bot.command('followup', async (ctx) => {
   }
 });
 
-// Abbrechen
-bot.command('abbrechen', (ctx) => {
-  if (ctx.session) {
-    ctx.session.contactData = null;
-    ctx.session.photoUrl = null;
-    ctx.session.followupContact = null;
-    ctx.session.state = null;
-  }
-  ctx.reply('✅ Zurückgesetzt');
-});
-
-// Text-Input für Kontakte oder Email-Entwürfe
-bot.on('text', async (ctx) => {
-  // Ignoriere Commands
-  if (ctx.message.text.startsWith('/')) {
-    return;
-  }
-  
-  // Stelle sicher dass session existiert
-  if (!ctx.session) {
-    ctx.session = {
-      state: null,
-      contactData: null,
-      photoUrl: null,
-      followupContact: null,
-      emailDraft: null,
-    };
-  }
-  
-  try {
-    // Email-Entwurf Mode
-    if (ctx.session.state === 'draft_email' && ctx.session.emailDraft) {
-      const emailDraft = ctx.session.emailDraft;
-      
-      // Generiere Betreff + formale Email
-      const emailResponse = await anthropic.messages.create({
-        model: 'claude-haiku-4-5',
-        max_tokens: 1024,
-        messages: [
-          {
-            role: 'user',
-            content: `Du bist Ali Mahlodji (CEO futureOne GmbH). Generiere eine professionelle Follow-up Email. Input: "${ctx.message.text}"
-            
-            Antworte NUR mit JSON format:
-            {
-              "betreff": "Email Betreff",
-              "body": "vollständiger Email Body (HTML formatted)"
-            }`,
-          },
-        ],
-      });
-      
-      const emailContent = emailResponse.content[0].text;
-      const jsonMatch = emailContent.match(/\{[\s\S]*\}/);
-      const emailData = jsonMatch ? JSON.parse(jsonMatch[0]) : { betreff: 'Follow-up', body: ctx.message.text };
-      
-      // Speichere als Entwurf in Airtable
-      await saveEmailDraft(emailDraft.name, emailDraft.email, emailData.betreff, emailData.body);
-      
-      ctx.reply(
-        `✅ Email-Entwurf gespeichert!\n\n` +
-        `📧 Empfänger: ${emailDraft.email}\n` +
-        `Betreff: ${emailData.betreff}\n\n` +
-        `Der Entwurf wurde in Airtable gespeichert. Claude versendet ihn später.`
-      );
-      
-      ctx.session.followupContact = null;
-      ctx.session.emailDraft = null;
-      ctx.session.state = null;
-      return;
-    }
-    
-    // Normaler Kontakt-Eingabe Mode
-    ctx.reply('⏳ Verarbeite Kontaktinfo...');
-    
-    // Parse Kontaktdaten aus Text
-    const contactData = await parseContactFromText(ctx.message.text);
-    ctx.session.contactData = contactData;
-    ctx.session.state = 'pending_photo';
-    
-    ctx.reply(
-      `✅ Kontakt erkannt:\n` +
-      `Name: ${contactData.name}\n` +
-      `Rolle: ${contactData.rolle || '—'}\n` +
-      `Email: ${contactData.email || '—'}\n` +
-      `Telefon: ${contactData.telefon || '—'}\n` +
-      `Firma: ${contactData.firma || '—'}\n\n` +
-      `Foto? (optional) Oder /speichern`
-    );
-  } catch (err) {
-    console.error('Fehler bei Text-Verarbeitung:', err);
-    ctx.reply('❌ Fehler bei der Verarbeitung');
-  }
+// Abbrechen (kurz: /br)
+bot.command('br', (ctx) => {
+  if (!ctx.session) ctx.session = {};
+  ctx.session.contactData = null;
+  ctx.session.photoUrl = null;
+  ctx.session.photoData = null;
+  ctx.session.followupContact = null;
+  ctx.session.state = null;
+  ctx.reply('❌ Abgebrochen');
 });
 
 // ============ START BOT ============
