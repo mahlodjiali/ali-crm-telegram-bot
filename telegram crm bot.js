@@ -4,11 +4,29 @@ const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk');
 require('dotenv').config();
 
-// ============ KONFIGURATION ============
+// ============ KONFIGURATION & VALIDATION ============
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN;
+const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN || process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
+
+// Validate required environment variables
+const missingVars = [];
+if (!TELEGRAM_TOKEN) missingVars.push('TELEGRAM_TOKEN');
+if (!AIRTABLE_TOKEN) missingVars.push('AIRTABLE_TOKEN');
+if (!AIRTABLE_BASE_ID) missingVars.push('AIRTABLE_BASE_ID');
+if (!CLAUDE_API_KEY) missingVars.push('CLAUDE_API_KEY');
+
+if (missingVars.length > 0) {
+  console.error('❌ MISSING ENVIRONMENT VARIABLES:');
+  missingVars.forEach(v => console.error(`   - ${v}`));
+  console.error('\n📋 Please set these variables in your Railway dashboard:');
+  console.error('   1. TELEGRAM_TOKEN → your Telegram bot token');
+  console.error('   2. AIRTABLE_TOKEN → your Airtable API key');
+  console.error('   3. AIRTABLE_BASE_ID → your Airtable base ID');
+  console.error('   4. CLAUDE_API_KEY → your Anthropic API key');
+  process.exit(1);
+}
 
 // Claude Client
 const anthropic = new Anthropic({ apiKey: CLAUDE_API_KEY });
@@ -17,12 +35,12 @@ const anthropic = new Anthropic({ apiKey: CLAUDE_API_KEY });
 Airtable.configure({ apiKey: AIRTABLE_TOKEN });
 const base = Airtable.base(AIRTABLE_BASE_ID);
 const PERSONEN_TABLE = 'Personen';
-const EMAIL_DRAFTS_TABLE = 'Email Entwürfe'; // Neue Tabelle für Entwürfe
+const EMAIL_DRAFTS_TABLE = 'Email Entwürfe';
 
 // Telegram Bot
 const bot = new Telegraf(TELEGRAM_TOKEN);
 
-// Session Middleware - speichert User-State
+// Session Middleware
 bot.use(session({
   defaultSession: () => ({
     state: null,
@@ -80,7 +98,6 @@ async function uploadPhotoToAirtable(fileUrl, fileName) {
     const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
     const base64 = Buffer.from(response.data).toString('base64');
     
-    // Speichere als Datei-Referenz (wird in Airtable eingebunden)
     return {
       url: fileUrl,
       filename: fileName || 'photo.jpg',
@@ -99,13 +116,11 @@ async function ensureFieldExists(fieldName, fieldType = 'singleLineText') {
     
     if (!fieldExists) {
       console.log(`Erstelle neues Feld: ${fieldName}`);
-      // Hinweis: Airtable API erlaubt keine direkten Schema-Änderungen über REST
-      // Daher: Erstelle ein generisches "Weitere Infos" Feld, wenn nicht vorhanden
       const customField = schema.fields.find(f => f.name === 'Notizen' || f.name === 'custom_fields');
       if (!customField) {
         console.log(`Warnung: ${fieldName} kann nicht hinzugefügt werden - nutze Notizen-Feld stattdessen`);
       }
-      return 'Notizen'; // Fallback
+      return 'Notizen';
     }
     return fieldName;
   } catch (err) {
@@ -154,10 +169,8 @@ async function saveContactToAirtable(data, photoUrl = null) {
       Tonalität: data.tonalitaet || undefined,
     };
     
-    // Entferne undefined Werte
     Object.keys(record).forEach(key => record[key] === undefined && delete record[key]);
     
-    // Füge Foto hinzu wenn vorhanden
     if (photoUrl) {
       record.Foto = [{ url: photoUrl }];
     }
@@ -189,7 +202,6 @@ async function findContactByName(name) {
 // Speichere Email-Entwurf in Airtable
 async function saveEmailDraft(contactName, contactEmail, subject, body) {
   try {
-    // Erstelle die Tabelle falls nicht vorhanden
     await base(EMAIL_DRAFTS_TABLE).create([{
       fields: {
         'Empfänger': contactName,
@@ -211,7 +223,6 @@ async function saveEmailDraft(contactName, contactEmail, subject, body) {
 
 // Start
 bot.command('start', (ctx) => {
-  // Initialisiere Session wenn nötig
   if (!ctx.session) {
     ctx.session = {
       state: null,
@@ -223,11 +234,11 @@ bot.command('start', (ctx) => {
   }
   
   ctx.reply(
-    `👋 Willkommen zu Ali's CRM Bot!\n\n` +
-    `Sende mir:\n` +
-    `📝 Text → Kontaktinfo eintragen (z.B. "Max Müller, CEO von TechX, max@techx.de")\n` +
-    `📷 Visitenkarten-Foto → Claude OCR extrahiert Daten\n` +
-    `👤 Personen-Foto → Wird zum Kontakt gespeichert\n\n` +
+    `👋 Willkommen zu Ali's CRM Bot!\\n\\n` +
+    `Sende mir:\\n` +
+    `📝 Text → Kontaktinfo eintragen (z.B. "Max Müller, CEO von TechX, max@techx.de")\\n` +
+    `📷 Visitenkarten-Foto → Claude OCR extrahiert Daten\\n` +
+    `👤 Personen-Foto → Wird zum Kontakt gespeichert\\n\\n` +
     `/followup [Name] → Follow-up Email senden`
   );
   ctx.session.state = null;
@@ -235,7 +246,6 @@ bot.command('start', (ctx) => {
 
 // Foto
 bot.on('photo', async (ctx) => {
-  // Stelle sicher dass session existiert
   if (!ctx.session) {
     ctx.session = {
       state: null,
@@ -249,7 +259,6 @@ bot.on('photo', async (ctx) => {
   try {
     const fileUrl = await ctx.telegram.getFileLink(ctx.message.photo[ctx.message.photo.length - 1].file_id);
     
-    // Versuche OCR für Visitenkarte
     ctx.reply('⏳ Verarbeite Foto...');
     const cardData = await extractBusinessCardData(fileUrl);
     
@@ -259,15 +268,14 @@ bot.on('photo', async (ctx) => {
       ctx.session.state = 'ready_save';
       
       ctx.reply(
-        `📇 Visitenkarte erkannt:\n` +
-        `Name: ${cardData.name || '—'}\n` +
-        `Rolle: ${cardData.rolle || '—'}\n` +
-        `Email: ${cardData.email || '—'}\n` +
-        `Firma: ${cardData.firma || '—'}\n\n` +
+        `📇 Visitenkarte erkannt:\\n` +
+        `Name: ${cardData.name || '—'}\\n` +
+        `Rolle: ${cardData.rolle || '—'}\\n` +
+        `Email: ${cardData.email || '—'}\\n` +
+        `Firma: ${cardData.firma || '—'}\\n\\n` +
         `/speichern um zu speichern`
       );
     } else if (ctx.session.contactData) {
-      // Speichere Foto zum bestehenden Kontakt
       ctx.session.photoUrl = fileUrl;
       ctx.reply('✅ Foto hinzugefügt. /speichern zum Speichern');
     } else {
@@ -290,7 +298,7 @@ bot.command('speichern', async (ctx) => {
     
     const recordId = await saveContactToAirtable(ctx.session.contactData, ctx.session.photoUrl);
     
-    ctx.reply(`✅ Kontakt gespeichert: ${ctx.session.contactData.name}\nID: ${recordId}`);
+    ctx.reply(`✅ Kontakt gespeichert: ${ctx.session.contactData.name}\\nID: ${recordId}`);
     
     ctx.session.contactData = null;
     ctx.session.photoUrl = null;
@@ -303,7 +311,6 @@ bot.command('speichern', async (ctx) => {
 
 // Follow-up Email Entwurf
 bot.command('followup', async (ctx) => {
-  // Stelle sicher dass session existiert
   if (!ctx.session) {
     ctx.session = {
       state: null,
@@ -341,8 +348,8 @@ bot.command('followup', async (ctx) => {
     };
     
     ctx.reply(
-      `📧 Follow-up für: ${contact.fields.Name}\n` +
-      `Email: ${contact.fields['E-Mail']}\n\n` +
+      `📧 Follow-up für: ${contact.fields.Name}\\n` +
+      `Email: ${contact.fields['E-Mail']}\\n\\n` +
       `Schreibe deine Nachricht (wird als Entwurf gespeichert):`
     );
   } catch (err) {
@@ -364,12 +371,10 @@ bot.command('abbrechen', (ctx) => {
 
 // Text-Input für Kontakte oder Email-Entwürfe
 bot.on('text', async (ctx) => {
-  // Ignoriere Commands
   if (ctx.message.text.startsWith('/')) {
     return;
   }
   
-  // Stelle sicher dass session existiert
   if (!ctx.session) {
     ctx.session = {
       state: null,
@@ -385,7 +390,6 @@ bot.on('text', async (ctx) => {
     if (ctx.session.state === 'draft_email' && ctx.session.emailDraft) {
       const emailDraft = ctx.session.emailDraft;
       
-      // Generiere Betreff + formale Email
       const emailResponse = await anthropic.messages.create({
         model: 'claude-3-5-sonnet-20241022',
         max_tokens: 1024,
@@ -407,13 +411,12 @@ bot.on('text', async (ctx) => {
       const jsonMatch = emailContent.match(/\{[\s\S]*\}/);
       const emailData = jsonMatch ? JSON.parse(jsonMatch[0]) : { betreff: 'Follow-up', body: ctx.message.text };
       
-      // Speichere als Entwurf in Airtable
       await saveEmailDraft(emailDraft.name, emailDraft.email, emailData.betreff, emailData.body);
       
       ctx.reply(
-        `✅ Email-Entwurf gespeichert!\n\n` +
-        `📧 Empfänger: ${emailDraft.email}\n` +
-        `Betreff: ${emailData.betreff}\n\n` +
+        `✅ Email-Entwurf gespeichert!\\n\\n` +
+        `📧 Empfänger: ${emailDraft.email}\\n` +
+        `Betreff: ${emailData.betreff}\\n\\n` +
         `Der Entwurf wurde in Airtable gespeichert. Claude versendet ihn später.`
       );
       
@@ -426,18 +429,17 @@ bot.on('text', async (ctx) => {
     // Normaler Kontakt-Eingabe Mode
     ctx.reply('⏳ Verarbeite Kontaktinfo...');
     
-    // Parse Kontaktdaten aus Text
     const contactData = await parseContactFromText(ctx.message.text);
     ctx.session.contactData = contactData;
     ctx.session.state = 'pending_photo';
     
     ctx.reply(
-      `✅ Kontakt erkannt:\n` +
-      `Name: ${contactData.name}\n` +
-      `Rolle: ${contactData.rolle || '—'}\n` +
-      `Email: ${contactData.email || '—'}\n` +
-      `Telefon: ${contactData.telefon || '—'}\n` +
-      `Firma: ${contactData.firma || '—'}\n\n` +
+      `✅ Kontakt erkannt:\\n` +
+      `Name: ${contactData.name}\\n` +
+      `Rolle: ${contactData.rolle || '—'}\\n` +
+      `Email: ${contactData.email || '—'}\\n` +
+      `Telefon: ${contactData.telefon || '—'}\\n` +
+      `Firma: ${contactData.firma || '—'}\\n\\n` +
       `Foto? (optional) Oder /speichern`
     );
   } catch (err) {
@@ -449,6 +451,7 @@ bot.on('text', async (ctx) => {
 // ============ START BOT ============
 bot.launch();
 console.log('🤖 Telegram CRM Bot läuft!');
+console.log('✅ Alle Umgebungsvariablen sind gesetzt.');
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
