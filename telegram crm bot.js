@@ -42,7 +42,7 @@ async function extractBusinessCardData(imageUrl) {
     const base64Image = Buffer.from(response.data).toString('base64');
     
     const message = await anthropic.messages.create({
-      model: 'claude-haiku-4-5',
+      model: 'claude-3-5-sonnet-20241022',
       max_tokens: 1024,
       messages: [
         {
@@ -117,7 +117,7 @@ async function ensureFieldExists(fieldName, fieldType = 'singleLineText') {
 // Extrahiere Daten aus Text
 async function parseContactFromText(text) {
   const message = await anthropic.messages.create({
-    model: 'claude-haiku-4-5',
+    model: 'claude-3-5-sonnet-20241022',
     max_tokens: 1024,
     messages: [
       {
@@ -387,7 +387,7 @@ bot.on('text', async (ctx) => {
       
       // Generiere Betreff + formale Email
       const emailResponse = await anthropic.messages.create({
-        model: 'claude-haiku-4-5',
+        model: 'claude-3-5-sonnet-20241022',
         max_tokens: 1024,
         messages: [
           {
@@ -452,3 +452,4 @@ console.log('🤖 Telegram CRM Bot läuft!');
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
