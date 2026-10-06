@@ -21,7 +21,17 @@ const EMAIL_DRAFTS_TABLE = 'Email Entwürfe'; // Neue Tabelle für Entwürfe
 
 // Telegram Bot
 const bot = new Telegraf(TELEGRAM_TOKEN);
-bot.use(session());
+
+// Session Middleware - speichert User-State
+bot.use(session({
+  defaultSession: () => ({
+    state: null,
+    contactData: null,
+    photoUrl: null,
+    followupContact: null,
+    emailDraft: null,
+  })
+}));
 
 // ============ HILFSFUNKTIONEN ============
 
@@ -32,7 +42,7 @@ async function extractBusinessCardData(imageUrl) {
     const base64Image = Buffer.from(response.data).toString('base64');
     
     const message = await anthropic.messages.create({
-      model: 'claude-opus-4-1',
+      model: 'claude-3-5-sonnet-20241022',
       max_tokens: 1024,
       messages: [
         {
@@ -107,7 +117,7 @@ async function ensureFieldExists(fieldName, fieldType = 'singleLineText') {
 // Extrahiere Daten aus Text
 async function parseContactFromText(text) {
   const message = await anthropic.messages.create({
-    model: 'claude-opus-4-1',
+    model: 'claude-3-5-sonnet-20241022',
     max_tokens: 1024,
     messages: [
       {
@@ -201,19 +211,41 @@ async function saveEmailDraft(contactName, contactEmail, subject, body) {
 
 // Start
 bot.command('start', (ctx) => {
+  // Initialisiere Session wenn nötig
+  if (!ctx.session) {
+    ctx.session = {
+      state: null,
+      contactData: null,
+      photoUrl: null,
+      followupContact: null,
+      emailDraft: null,
+    };
+  }
+  
   ctx.reply(
     `👋 Willkommen zu Ali's CRM Bot!\n\n` +
     `Sende mir:\n` +
     `📝 Text → Kontaktinfo eintragen (z.B. "Max Müller, CEO von TechX, max@techx.de")\n` +
     `📷 Visitenkarten-Foto → Claude OCR extrahiert Daten\n` +
     `👤 Personen-Foto → Wird zum Kontakt gespeichert\n\n` +
-    `/followup [Name] → Folge-Up Email senden`
+    `/followup [Name] → Follow-up Email senden`
   );
   ctx.session.state = null;
 });
 
 // Foto
 bot.on('photo', async (ctx) => {
+  // Stelle sicher dass session existiert
+  if (!ctx.session) {
+    ctx.session = {
+      state: null,
+      contactData: null,
+      photoUrl: null,
+      followupContact: null,
+      emailDraft: null,
+    };
+  }
+  
   try {
     const fileUrl = await ctx.telegram.getFileLink(ctx.message.photo[ctx.message.photo.length - 1].file_id);
     
@@ -250,8 +282,8 @@ bot.on('photo', async (ctx) => {
 // Speichern
 bot.command('speichern', async (ctx) => {
   try {
-    if (!ctx.session.contactData) {
-      return ctx.reply('❌ Keine Kontaktdaten vorhanden. Sende zuerst eine Sprachnachricht oder Visitenkarte.');
+    if (!ctx.session || !ctx.session.contactData) {
+      return ctx.reply('❌ Keine Kontaktdaten vorhanden. Sende zuerst eine Textnachricht oder Visitenkarte.');
     }
     
     ctx.reply('⏳ Speichere Kontakt...');
@@ -271,6 +303,17 @@ bot.command('speichern', async (ctx) => {
 
 // Follow-up Email Entwurf
 bot.command('followup', async (ctx) => {
+  // Stelle sicher dass session existiert
+  if (!ctx.session) {
+    ctx.session = {
+      state: null,
+      contactData: null,
+      photoUrl: null,
+      followupContact: null,
+      emailDraft: null,
+    };
+  }
+  
   const args = ctx.message.text.split(' ').slice(1).join(' ');
   
   if (!args) {
@@ -310,11 +353,13 @@ bot.command('followup', async (ctx) => {
 
 // Abbrechen
 bot.command('abbrechen', (ctx) => {
-  ctx.session.contactData = null;
-  ctx.session.photoUrl = null;
-  ctx.session.followupContact = null;
-  ctx.session.state = null;
-  ctx.reply('❌ Abgebrochen');
+  if (ctx.session) {
+    ctx.session.contactData = null;
+    ctx.session.photoUrl = null;
+    ctx.session.followupContact = null;
+    ctx.session.state = null;
+  }
+  ctx.reply('✅ Zurückgesetzt');
 });
 
 // Text-Input für Kontakte oder Email-Entwürfe
@@ -324,6 +369,17 @@ bot.on('text', async (ctx) => {
     return;
   }
   
+  // Stelle sicher dass session existiert
+  if (!ctx.session) {
+    ctx.session = {
+      state: null,
+      contactData: null,
+      photoUrl: null,
+      followupContact: null,
+      emailDraft: null,
+    };
+  }
+  
   try {
     // Email-Entwurf Mode
     if (ctx.session.state === 'draft_email' && ctx.session.emailDraft) {
@@ -331,7 +387,7 @@ bot.on('text', async (ctx) => {
       
       // Generiere Betreff + formale Email
       const emailResponse = await anthropic.messages.create({
-        model: 'claude-opus-4-1',
+        model: 'claude-3-5-sonnet-20241022',
         max_tokens: 1024,
         messages: [
           {
